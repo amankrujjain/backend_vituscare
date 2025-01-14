@@ -99,14 +99,18 @@ const findCentre = async (req, res) => {
     if (lat && lng) {
       userLocation.lat = parseFloat(lat);
       userLocation.lng = parseFloat(lng);
+      console.log("User location determined from lat/lng:", userLocation);
     } else if (selectedPlaceId) {
       // Use Place ID to fetch coordinates
+      console.log("Fetching location from selectedPlaceId:", selectedPlaceId);
+
       const placeDetailsResponse = await axios.get(
         `${process.env.GOOGLE_MAPS_BASE_URL}/place/details/json`,
         {
           params: { place_id: selectedPlaceId, key: process.env.MAP_API_KEY },
         }
       );
+
 
       if (placeDetailsResponse.data.status !== "OK") {
         return res.status(400).json({
@@ -119,12 +123,15 @@ const findCentre = async (req, res) => {
       const location = placeDetailsResponse.data.result.geometry.location;
       userLocation.lat = location.lat;
       userLocation.lng = location.lng;
+      console.log("User location determined from Place ID:", userLocation);
     } else if (input) {
       // Fetch suggestions
+
       const placesResponse = await axios.get(
         `${process.env.GOOGLE_MAPS_BASE_URL}/place/autocomplete/json`,
         { params: { input, key: process.env.MAP_API_KEY } }
       );
+
 
       const suggestions = placesResponse.data.predictions;
 
@@ -135,14 +142,16 @@ const findCentre = async (req, res) => {
     }
 
     if (!userLocation.lat || !userLocation.lng) {
+      console.error("Unable to determine user location:", userLocation);
       return res.status(400).json({
         success: false,
         message: "Unable to determine location. Provide valid input or enable geolocation.",
       });
     }
 
-    // Fetch nearby centers from the database
+    // Step 2: Fetch nearby centers from the database
     const centers = await Centre.find({ is_active: true });
+
     if (!centers.length) {
       return res.status(200).json({
         success: true,
@@ -151,76 +160,80 @@ const findCentre = async (req, res) => {
       });
     }
 
-    // Construct destinations string
-    const destinations = centers.map(center => `${center.latitude},${center.longitude}`).join("|");
-    console.log("Destinations String:", destinations);
+    // Step 3: Optional pre-filtering (reduce API calls)
+    const filterCloseCenters = (userLocation, centers, maxDistance = 100) => {
+      const R = 6371; // Earth's radius in kilometers
 
-    // Fetch distances using Google Distance Matrix API
-    const distanceResponse = await axios.get(
-      `${process.env.GOOGLE_MAPS_BASE_URL}/distancematrix/json`,
-      {
-        params: {
-          origins: `${userLocation.lat},${userLocation.lng}`,
-          destinations,
-          mode: 'driving',
-          key: process.env.MAP_API_KEY,
-        },
-      }
-    );
+      return centers.filter((center) => {
+        const dLat = (center.latitude - userLocation.lat) * (Math.PI / 180);
+        const dLng = (center.longitude - userLocation.lng) * (Math.PI / 180);
+        const a =
+          Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos(userLocation.lat * (Math.PI / 180)) *
+          Math.cos(center.latitude * (Math.PI / 180)) *
+          Math.sin(dLng / 2) * Math.sin(dLng / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        const distance = R * c; // Distance in kilometers
 
-    if (distanceResponse.data.status !== "OK") {
-      return res.status(400).json({
-        success: false,
-        message: "Failed to fetch distances.",
-        error: distanceResponse.data.error_message || "Unknown error",
+        return distance <= maxDistance;
+      });
+    };
+
+    const nearbyCenters = filterCloseCenters(userLocation, centers, 100);
+
+    if (!nearbyCenters.length) {
+      return res.status(200).json({
+        success: true,
+        message: "No centers found within 100km.",
+        userLocation,
+        centers: [],
       });
     }
 
-    const distances = distanceResponse.data.rows[0]?.elements || [];
-    if (!distances.length) {
+    // Step 4: Batch destinations for API requests
+    const MAX_PAIRS = 100; // Paid tier limit
+    const destinationBatches = [];
+    for (let i = 0; i < nearbyCenters.length; i += MAX_PAIRS) {
+      const batch = nearbyCenters.slice(i, i + MAX_PAIRS);
+      const destinations = batch.map(center => `${center.latitude},${center.longitude}`).join("|");
+      destinationBatches.push(destinations);
+    }
+
+
+    const distanceResults = [];
+    for (const batchDestinations of destinationBatches) {
+      const response = await axios.get(
+        `${process.env.GOOGLE_MAPS_BASE_URL}/distancematrix/json`,
+        {
+          params: {
+            origins: `${userLocation.lat},${userLocation.lng}`,
+            destinations: batchDestinations,
+            mode: "driving",
+            key: process.env.MAP_API_KEY,
+          },
+        }
+      );
+
+
+      if (response.data.status === "OK") {
+        distanceResults.push(...response.data.rows[0]?.elements);
+      } else {
+      }
+    }
+
+    if (!distanceResults.length) {
       return res.status(400).json({
         success: false,
         message: "No distance data found.",
       });
     }
 
-    console.log("Distances Array:", distances);
-
-    // Filter nearby centers with their original indices
-    const nearbyCentersWithIndex = centers
-      .map((center, index) => ({ center, index })) // Attach index to each center
-      .filter(({ center, index }) => {
-        const distanceData = distances[index];
-        if (!distanceData || distanceData.status !== "OK") {
-          console.log(`Skipping center ${center.name_of_centre}: Invalid distance data.`);
-          return false;
-        }
-        const distanceInMeters = distanceData.distance.value;
-        console.log(
-          `Filtering Center: ${center.name_of_centre}, Distance = ${distanceInMeters / 1000} km`
-        );
-        return distanceInMeters <= 50000; // 50 km in meters
-      });
-
-    console.log("Filtered Nearby Centers with Indices:", nearbyCentersWithIndex);
-
-    if (!nearbyCentersWithIndex.length) {
-      return res.status(200).json({
-        success: true,
-        message: "No centers found within 50km.",
-        userLocation,
-        centers: [],
-      });
-    }
-
-    // Map results while preserving correct distance data
-    const results = nearbyCentersWithIndex.map(({ center, index }) => {
-      const distanceData = distances[index]; // Use the original index for distance
-      console.log(
-        `Mapping Result for Center: ${center.name_of_centre}, Distance = ${
-          distanceData?.distance?.text || "N/A"
-        }`
-      );
+    // Step 5: Map results while preserving correct distance data
+    const results = nearbyCenters.map((center, index) => {
+      const distanceData = distanceResults[index];
+      if (!distanceData || distanceData.status !== "OK") {
+        return null;
+      }
       return {
         _id: center._id,
         name_of_centre: center.name_of_centre,
@@ -232,8 +245,8 @@ const findCentre = async (req, res) => {
         map_location: center.map_location,
         distance: distanceData?.distance?.text || "Distance not available",
       };
-    });
-        console.log("Final Results:", results);
+    }).filter(Boolean);
+
 
     res.status(200).json({
       success: true,
@@ -245,6 +258,7 @@ const findCentre = async (req, res) => {
     res.status(500).json({ success: false, message: "Server error", error: err.message });
   }
 };
+
 
 
 
@@ -497,6 +511,118 @@ const deleteJobPost = async(req,res)=>{
     })
   }
 }
+// test code
+
+const getNearestLocations = async (req, res) => {
+  const { lat, lng, placeId } = req.query;
+
+  try {
+    let userLocation = { lat: null, lng: null };
+
+    // Step 1: Determine user location
+    if (lat && lng) {
+      // Use lat/lng directly
+      userLocation = {
+        lat: parseFloat(lat),
+        lng: parseFloat(lng),
+      };
+    } else if (placeId) {
+      // Use Place ID to fetch latitude and longitude
+      const placeDetailsResponse = await axios.get(
+        `${process.env.GOOGLE_MAPS_BASE_URL}/place/details/json`,
+        {
+          params: { place_id: placeId, key: process.env.MAP_API_KEY },
+        }
+      );
+
+      if (placeDetailsResponse.data.status !== "OK") {
+        return res.status(400).json({
+          success: false,
+          message: "Failed to fetch place details.",
+          error: placeDetailsResponse.data.error_message || "Unknown error",
+        });
+      }
+
+      const location = placeDetailsResponse.data.result.geometry.location;
+      userLocation = {
+        lat: location.lat,
+        lng: location.lng,
+      };
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: "Latitude, longitude, or Place ID is required.",
+      });
+    }
+
+    // Step 2: Fetch all locations from the database
+    const locations = await Centre.find({ is_active: true });
+
+    if (!locations.length) {
+      return res.status(200).json({
+        success: true,
+        message: "No locations available in the database.",
+        locations: [],
+      });
+    }
+
+    // Step 3: Haversine formula to calculate distances
+    const calculateDistance = (lat1, lng1, lat2, lng2) => {
+      const R = 6371; // Radius of Earth in kilometers
+      const dLat = ((lat2 - lat1) * Math.PI) / 180;
+      const dLng = ((lng2 - lng1) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos((lat1 * Math.PI) / 180) *
+          Math.cos((lat2 * Math.PI) / 180) *
+          Math.sin(dLng / 2) * Math.sin(dLng / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c; // Distance in kilometers
+    };
+
+    // Step 4: Filter locations within 100 km
+    const nearbyLocations = locations
+      .map((location) => {
+        const distance = calculateDistance(
+          userLocation.lat,
+          userLocation.lng,
+          location.latitude,
+          location.longitude
+        );
+
+        if (distance <= 100) {
+          return {
+            _id: location._id,
+            name_of_centre: location.name_of_centre,
+            address_of_centre: location.address_of_centre,
+            phone: location.phone,
+            state: location.state,
+            city: location.city,
+            pin_code: location.pin_code,
+            map_location: location.map_location,
+            distance: distance.toFixed(2) + " km",
+          };
+        }
+        return null;
+      })
+      .filter(Boolean);
+
+    // Step 5: Return the filtered locations
+    return res.status(200).json({
+      success: true,
+      userLocation,
+      locations: nearbyLocations,
+    });
+  } catch (error) {
+    console.error("Error fetching nearest locations:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
 
 module.exports = {
   createCentre,
@@ -508,5 +634,6 @@ module.exports = {
   getSingleJob,
   updateJobPost,
   deleteJobPost,
-  activateJobPost
+  activateJobPost,
+  getNearestLocations
 }
