@@ -4,6 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const axios = require('axios');
+const path  = require('path');
 
 // file imports
 
@@ -29,7 +30,7 @@ app.use(cors({
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
+app.use('/centre_photos', express.static(path.join(__dirname, 'centre_photos')));
 connectDB();
 
 

@@ -44,6 +44,14 @@ const CentreSchema = new mongoose.Schema({
         type: Boolean,
         default: true
     },
+    pic: {
+        type: [String],
+        default: []
+    },
+    location: {
+        type: String,
+        default: ""
+    },
     additional_details: {
         Timing_of_centre: {
             type: [
@@ -53,7 +61,7 @@ const CentreSchema = new mongoose.Schema({
               }
             ],
             default: [],
-          },
+        },
         Ayushman: {
             type: String,
             default: ""

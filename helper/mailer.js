@@ -361,7 +361,7 @@ const appointmentMail = async (req, res) => {
                                           <tr>
                                             <td align="center" class="esd-block-text es-p10b">
                                               <h1 class="es-m-txt-c" style="font-size:46px;line-height:100%;color:#6aa84f">
-                                                Appointment Confirmed !
+                                                Appointment Request Received !
                                               </h1>
                                             </td>
                                           </tr>
@@ -379,7 +379,7 @@ const appointmentMail = async (req, res) => {
                                           <tr>
                                             <td align="left" class="esd-block-text es-p5t es-p5b es-p40r es-p40l es-m-p0r es-m-p0l">
                                               <p>
-                                                Hi, ${name}! We have received a request for appointment for Service: ${service}.&nbsp;
+                                                Hi, ${name}! We have received your request for Service: ${service}.&nbsp;
                                               </p>
                                               <p>
                                                 ​

@@ -5,6 +5,8 @@ const { validationResult } = require('express-validator')
 const mongoose = require("mongoose")
 const axios = require('axios');
 const dotenv = require('dotenv');
+const path = require('path');
+
 
 dotenv.config()
 
@@ -74,6 +76,61 @@ const createCentre = async (req, res) => {
   }
 };
 
+const updateCentre = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
+
+    // Check for uploaded images
+    const imagePaths = req.files?.map((file) =>
+      path.join('/centre_photos', file.filename)
+    );
+
+    // Ensure the image paths are stored in the `pic` property
+    if (imagePaths?.length > 0) {
+      updateData.pic = imagePaths; // Map image paths to `pic` property
+    }
+
+    // Validate Timing_of_centre if it exists in the update data
+    if (
+      updateData.additional_details?.Timing_of_centre &&
+      (!Array.isArray(updateData.additional_details.Timing_of_centre) ||
+        !updateData.additional_details.Timing_of_centre.every(
+          (item) => item.day && item.time
+        ))
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Timing_of_centre must be an array of objects with 'day' and 'time' fields.",
+      });
+    }
+
+    // Update the centre in the database
+    const centre = await Centre.findByIdAndUpdate(id, updateData, {
+      new: true,
+    });
+
+    if (!centre) {
+      return res.status(404).json({
+        success: false,
+        message: 'No centre found!',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Centre successfully updated!',
+      centre,
+    });
+  } catch (error) {
+    console.log('Error occurred while updating the centre data.', error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error.',
+    });
+  }
+};
 
 const getAllCenters = async (req, res) => {
   try {
@@ -111,7 +168,6 @@ const findCentre = async (req, res) => {
         }
       );
 
-
       if (placeDetailsResponse.data.status !== "OK") {
         return res.status(400).json({
           success: false,
@@ -126,12 +182,10 @@ const findCentre = async (req, res) => {
       console.log("User location determined from Place ID:", userLocation);
     } else if (input) {
       // Fetch suggestions
-
       const placesResponse = await axios.get(
         `${process.env.GOOGLE_MAPS_BASE_URL}/place/autocomplete/json`,
         { params: { input, key: process.env.MAP_API_KEY } }
       );
-
 
       const suggestions = placesResponse.data.predictions;
 
@@ -161,7 +215,7 @@ const findCentre = async (req, res) => {
     }
 
     // Step 3: Optional pre-filtering (reduce API calls)
-    const filterCloseCenters = (userLocation, centers, maxDistance = 100) => {
+    const filterCloseCenters = (userLocation, centers, maxDistance = 1000) => {
       const R = 6371; // Earth's radius in kilometers
 
       return centers.filter((center) => {
@@ -179,7 +233,7 @@ const findCentre = async (req, res) => {
       });
     };
 
-    const nearbyCenters = filterCloseCenters(userLocation, centers, 100);
+    const nearbyCenters = filterCloseCenters(userLocation, centers, 1000);
 
     if (!nearbyCenters.length) {
       return res.status(200).json({
@@ -190,63 +244,40 @@ const findCentre = async (req, res) => {
       });
     }
 
-    // Step 4: Batch destinations for API requests
-    const MAX_PAIRS = 100; // Paid tier limit
-    const destinationBatches = [];
-    for (let i = 0; i < nearbyCenters.length; i += MAX_PAIRS) {
-      const batch = nearbyCenters.slice(i, i + MAX_PAIRS);
-      const destinations = batch.map(center => `${center.latitude},${center.longitude}`).join("|");
-      destinationBatches.push(destinations);
-    }
-
-
-    const distanceResults = [];
-    for (const batchDestinations of destinationBatches) {
-      const response = await axios.get(
-        `${process.env.GOOGLE_MAPS_BASE_URL}/distancematrix/json`,
+    // Step 4: Use Google Directions API for distances
+    const results = [];
+    for (const center of nearbyCenters) {
+      const directionsResponse = await axios.get(
+        `${process.env.GOOGLE_MAPS_BASE_URL}/directions/json`,
         {
           params: {
-            origins: `${userLocation.lat},${userLocation.lng}`,
-            destinations: batchDestinations,
+            origin: `${userLocation.lat},${userLocation.lng}`,
+            destination: `${center.latitude},${center.longitude}`,
             mode: "driving",
             key: process.env.MAP_API_KEY,
           },
         }
       );
 
+      if (directionsResponse.data.status === "OK") {
+        const route = directionsResponse.data.routes[0];
+        const distance = route?.legs[0]?.distance?.text || "Distance not available";
+        const duration = route?.legs[0]?.duration?.text || "Duration not available";
 
-      if (response.data.status === "OK") {
-        distanceResults.push(...response.data.rows[0]?.elements);
-      } else {
+        results.push({
+          _id: center._id,
+          name_of_centre: center.name_of_centre,
+          address_of_centre: center.address_of_centre,
+          phone: center.phone,
+          state: center.state,
+          city: center.city,
+          pin_code: center.pin_code,
+          map_location: center.map_location,
+          distance,
+          duration,
+        });
       }
     }
-
-    if (!distanceResults.length) {
-      return res.status(400).json({
-        success: false,
-        message: "No distance data found.",
-      });
-    }
-
-    // Step 5: Map results while preserving correct distance data
-    const results = nearbyCenters.map((center, index) => {
-      const distanceData = distanceResults[index];
-      if (!distanceData || distanceData.status !== "OK") {
-        return null;
-      }
-      return {
-        _id: center._id,
-        name_of_centre: center.name_of_centre,
-        address_of_centre: center.address_of_centre,
-        phone: center.phone,
-        state: center.state,
-        city: center.city,
-        pin_code: center.pin_code,
-        map_location: center.map_location,
-        distance: distanceData?.distance?.text || "Distance not available",
-      };
-    }).filter(Boolean);
-
 
     res.status(200).json({
       success: true,
@@ -258,8 +289,6 @@ const findCentre = async (req, res) => {
     res.status(500).json({ success: false, message: "Server error", error: err.message });
   }
 };
-
-
 
 
 const getSingleCenter = async (req, res) => {
@@ -315,17 +344,17 @@ const createJob = async (req, res) => {
     };
 
     const newJobPost = new Career({
-      job_title, 
-      job_location, 
-      job_type, 
-      job_experience, 
-      job_created_on, 
-      job_description, 
+      job_title,
+      job_location,
+      job_type,
+      job_experience,
+      job_created_on,
+      job_description,
       is_active
     });
 
     await newJobPost.save();
-    
+
     return res.status(201).json({
       success: true,
       message: "Job post created successfully",
@@ -341,13 +370,13 @@ const createJob = async (req, res) => {
   }
 };
 
-const getAllJobs = async(req,res)=>{
+const getAllJobs = async (req, res) => {
   try {
-    const jobPost = await Career.find({is_active: true}).sort({job_created_on: 1});
-    if(!jobPost){
+    const jobPost = await Career.find({ is_active: true }).sort({ job_created_on: 1 });
+    if (!jobPost) {
       return res.status(400).json({
         success: false,
-        message:"No Job Available"
+        message: "No Job Available"
       })
     }
 
@@ -357,10 +386,10 @@ const getAllJobs = async(req,res)=>{
       data: jobPost
     })
   } catch (error) {
-    console.log("Error while fetching the job post",error);
+    console.log("Error while fetching the job post", error);
     return res.status(500).json({
       success: false,
-      message:"Error occured while fetching jobs"
+      message: "Error occured while fetching jobs"
     })
   }
 };
@@ -416,21 +445,21 @@ const activateJobPost = async (req, res) => {
       });
     }
 
-    if(jobPost.is_active === true){
+    if (jobPost.is_active === true) {
       return res.status(409).json({
         success: false,
         message: `Job post is already active`,
       });
     }
-    
-      jobPost.is_active = true;
-      await jobPost.save();
-      return res.status(200).json({
-        success: true,
-        message: `Job post successfully activated`,
-        data: jobPost,
-      });
-   
+
+    jobPost.is_active = true;
+    await jobPost.save();
+    return res.status(200).json({
+      success: true,
+      message: `Job post successfully activated`,
+      data: jobPost,
+    });
+
   } catch (error) {
     console.error("Error while activating/deactivating the job post", error);
     return res.status(500).json({
@@ -476,27 +505,27 @@ const updateJobPost = async (req, res) => {
   }
 };
 
-const deleteJobPost = async(req,res)=>{
+const deleteJobPost = async (req, res) => {
   try {
-    const {id} = req.params;
+    const { id } = req.params;
 
     const jobPost = await Career.findById(id);
 
-    if(!jobPost){
+    if (!jobPost) {
       return res.status(404).json({
         success: false,
-        messsage:"No related jobs were found !"
+        messsage: "No related jobs were found !"
       })
     };
 
-    if(jobPost.is_active === false){
+    if (jobPost.is_active === false) {
       return res.status(409).json({
         success: false,
         message: "job is already inactive"
       })
     };
 
-    const updatedJob = await Career.findByIdAndUpdate(id,{is_active: false}, {new: true});
+    const updatedJob = await Career.findByIdAndUpdate(id, { is_active: false }, { new: true });
 
     return res.status(200).json({
       success: true,
@@ -507,7 +536,7 @@ const deleteJobPost = async(req,res)=>{
     console.log("Internal server error", error);
     return res.status(500).json({
       success: false,
-      message:"Internal server error"
+      message: "Internal server error"
     })
   }
 }
@@ -574,8 +603,8 @@ const getNearestLocations = async (req, res) => {
       const a =
         Math.sin(dLat / 2) * Math.sin(dLat / 2) +
         Math.cos((lat1 * Math.PI) / 180) *
-          Math.cos((lat2 * Math.PI) / 180) *
-          Math.sin(dLng / 2) * Math.sin(dLng / 2);
+        Math.cos((lat2 * Math.PI) / 180) *
+        Math.sin(dLng / 2) * Math.sin(dLng / 2);
       const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
       return R * c; // Distance in kilometers
     };
@@ -628,6 +657,7 @@ module.exports = {
   createCentre,
   findCentre,
   getSingleCenter,
+  updateCentre,
   getAllCenters,
   createJob,
   getAllJobs,
