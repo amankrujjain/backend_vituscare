@@ -23,6 +23,8 @@ const createCentre = async (req, res) => {
       longitude,
       latitude,
       created_at,
+      location,
+      pic,
       is_active,
       additional_details, // Expecting additional details from the request body
     } = req.body;
@@ -53,6 +55,8 @@ const createCentre = async (req, res) => {
       map_location,
       longitude,
       latitude,
+      location,
+      pic,
       create_at: created_at, // Mapping created_at correctly to the schema field
       is_active,
       additional_details, // Include additional_details object in the document
@@ -81,17 +85,16 @@ const updateCentre = async (req, res) => {
     const { id } = req.params;
     const updateData = req.body;
 
-    // Check for uploaded images
     const imagePaths = req.files?.map((file) =>
       path.join('/centre_photos', file.filename)
     );
 
-    // Ensure the image paths are stored in the `pic` property
+  
     if (imagePaths?.length > 0) {
-      updateData.pic = imagePaths; // Map image paths to `pic` property
+      updateData.pic = imagePaths;
     }
 
-    // Validate Timing_of_centre if it exists in the update data
+
     if (
       updateData.additional_details?.Timing_of_centre &&
       (!Array.isArray(updateData.additional_details.Timing_of_centre) ||
@@ -106,7 +109,7 @@ const updateCentre = async (req, res) => {
       });
     }
 
-    // Update the centre in the database
+
     const centre = await Centre.findByIdAndUpdate(id, updateData, {
       new: true,
     });
